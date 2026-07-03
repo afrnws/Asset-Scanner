@@ -99,29 +99,44 @@
   }
 
   function mulaiScanner() {
-    // Tidak dibatasi formatnya (QR maupun barcode 1D apapun langsung dicoba dibaca)
     scanner = new Html5Qrcode('reader');
-    scanner.start(
-      { facingMode: 'environment' },
-      {
-        fps: 15,
-        qrbox: { width: 260, height: 150 },
-        videoConstraints: {
-          width: { ideal: 1920 },
-          height: { ideal: 1080 },
-          advanced: [{ focusMode: 'continuous' }, { exposureMode: 'continuous' }]
-        }
-      },
-      onScanSuccess,
-      function () { /* frame tanpa kode, abaikan */ }
-    ).then(function () {
+    var scanConfig = {
+      fps: 15,
+      qrbox: { width: 260, height: 150 }
+    };
+
+    // Minta daftar semua kamera dulu, lalu cari yang labelnya mengandung
+    // "back"/"rear"/"environment" — lebih andal daripada facingMode saja,
+    // karena tidak semua HP melaporkan facingMode dengan benar.
+    Html5Qrcode.getCameras().then(function (devices) {
+      if (!devices || devices.length === 0) {
+        throw new Error('Tidak ada kamera terdeteksi');
+      }
+      var kameraBelakang = devices.find(function (d) {
+        return /back|rear|environment|belakang/i.test(d.label);
+      }) || devices[devices.length - 1]; // fallback: kamera terakhir di daftar (biasanya kamera utama/belakang)
+
+      return scanner.start(kameraBelakang.id, scanConfig, onScanSuccess, function () {});
+    }).then(function () {
       statusEl.textContent = 'Arahkan kamera ke kode aset';
       statusEl.className = '';
       aktifkanTapFocus();
     }).catch(function (err) {
-      statusEl.textContent = 'Kamera tidak bisa diakses. Gunakan input manual di bawah.';
-      statusEl.className = 'error';
-      toggleManual();
+      // Fallback terakhir: coba facingMode environment kalau getCameras gagal total
+      scanner.start(
+        { facingMode: 'environment' },
+        scanConfig,
+        onScanSuccess,
+        function () {}
+      ).then(function () {
+        statusEl.textContent = 'Arahkan kamera ke kode aset';
+        statusEl.className = '';
+        aktifkanTapFocus();
+      }).catch(function (err2) {
+        statusEl.textContent = 'Kamera tidak bisa diakses: ' + (err2.message || err2) + '. Gunakan input manual.';
+        statusEl.className = 'error';
+        toggleManual();
+      });
     });
   }
 
