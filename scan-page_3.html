@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Scan Angka Aset - OJK Purwokerto</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; font-family:'Segoe UI', Roboto, sans-serif; }
+  body { background:#0B2545; height:100vh; display:flex; flex-direction:column; }
+  header { padding:16px; text-align:center; color:#fff; font-size:15px; font-weight:700; }
+  header span { display:block; font-size:11px; font-weight:400; color:#94A3B8; margin-top:2px; }
+
+  #cam-wrap { flex:1; position:relative; display:flex; align-items:center; justify-content:center; overflow:hidden; }
+  #video { width:100%; max-width:480px; }
+  #guideBox {
+    position:absolute; border:3px dashed #4ADE80; border-radius:8px;
+    width:150px; height:64px; pointer-events:none;
+  }
+  #guideBox::after {
+    content: "5 digit terakhir";
+    position:absolute; top:-22px; left:0; right:0; text-align:center;
+    color:#4ADE80; font-size:11px; font-weight:700;
+  }
+  #status {
+    position:absolute; bottom:16px; left:0; right:0; text-align:center;
+    color:#fff; font-size:13px; font-weight:600; padding:0 20px;
+  }
+  #status.error { color:#F87171; }
+  #status.success { color:#4ADE80; }
+
+  footer { padding:16px; display:flex; gap:10px; }
+  button {
+    flex:1; height:52px; border:none; border-radius:12px; font-size:14px;
+    font-weight:700; cursor:pointer; color:#fff;
+  }
+  #btnCapture { background:#C8102E; font-size:15px; }
+  #btnCapture:disabled { background:#64748B; }
+  #btnManual { background:#334155; flex:0 0 110px; }
+  #btnClose { background:#334155; flex:0 0 90px; }
+
+  #manualBox { display:none; padding:0 16px 12px; gap:8px; flex-direction:column; }
+  #manualBox input { height:46px; border-radius:10px; border:none; padding:0 14px; font-size:16px; text-align:center; }
+  #manualBox button { background:#134074; }
+
+  #resultPreview {
+    display:none; padding:10px 16px; background:#134074; color:#fff;
+    font-size:13px; text-align:center;
+  }
+  #resultPreview b { font-size:18px; letter-spacing:1px; }
+
+  canvas { display:none; }
+</style>
+</head>
+<body>
+
+<header>
+  Baca Nomor Aset
+  <span>Foto label, sistem baca angkanya otomatis</span>
+</header>
+
+<div id="cam-wrap">
+  <video id="video" autoplay playsinline muted></video>
+  <div id="guideBox"></div>
+  <div id="status">Menyiapkan kamera...</div>
+</div>
+
+<div id="resultPreview">
+  Angka terbaca: <b id="resultText">-</b>
+  <div style="margin-top:8px; display:flex; gap:8px;">
+    <button type="button" style="height:38px; background:#2E7D32;" onclick="pakaiHasil()">✔ Gunakan</button>
+    <button type="button" style="height:38px; background:#64748B;" onclick="ulangiFoto()">↻ Foto Ulang</button>
+  </div>
+</div>
+
+<div id="manualBox">
+  <input type="text" id="manualInput" maxlength="5" inputmode="numeric" placeholder="Atau ketik 5 digit manual">
+  <button type="button" onclick="kirimManual()">Gunakan nomor ini</button>
+</div>
+
+<canvas id="canvas"></canvas>
+
+<footer>
+  <button id="btnManual" type="button" onclick="toggleManual()">Manual</button>
+  <button id="btnCapture" type="button" onclick="ambilFoto()">📸 Baca Angka</button>
+  <button id="btnClose" type="button" onclick="window.close()">Tutup</button>
+</footer>
+
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+<script>
+  var statusEl = document.getElementById('status');
+  var video = document.getElementById('video');
+  var canvas = document.getElementById('canvas');
+  var ocrWorker = null;
+  var kodeTerakhir = "";
+  var sudahKirim = false;
+
+  async function siapkanOCR() {
+    ocrWorker = await Tesseract.createWorker('eng');
+    await ocrWorker.setParameters({
+      tessedit_char_whitelist: '0123456789',
+      tessedit_pageseg_mode: '7'
+    });
+  }
+
+  async function mulaiKamera() {
+    try {
+      var stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          facingMode: 'environment',
+          width: { ideal: 1920 },
+          height: { ideal: 1080 },
+          advanced: [{ focusMode: 'continuous' }, { exposureMode: 'continuous' }]
+        }
+      });
+      video.srcObject = stream;
+      statusEl.textContent = 'Geser HP: sejajarkan UJUNG KANAN deretan angka ke kotak hijau';
+      statusEl.className = '';
+      document.getElementById('btnCapture').disabled = false;
+    } catch (err) {
+      statusEl.textContent = 'Kamera tidak bisa diakses. Gunakan input manual.';
+      statusEl.className = 'error';
+      toggleManual();
+    }
+  }
+
+  function praprosesGambar(ctx, w, h) {
+    var imgData = ctx.getImageData(0, 0, w, h);
+    var d = imgData.data;
+    for (var i = 0; i < d.length; i += 4) {
+      var gray = 0.3 * d[i] + 0.59 * d[i+1] + 0.11 * d[i+2];
+      var v = gray > 140 ? 255 : 0;
+      d[i] = d[i+1] = d[i+2] = v;
+    }
+    ctx.putImageData(imgData, 0, 0);
+  }
+
+  async function ambilFoto() {
+    if (!ocrWorker) { statusEl.textContent = 'OCR belum siap, tunggu sebentar...'; return; }
+
+    var vw = video.videoWidth, vh = video.videoHeight;
+    var boxEl = document.getElementById('guideBox');
+    var boxRect = boxEl.getBoundingClientRect();
+    var videoRect = video.getBoundingClientRect();
+    var scaleX = vw / videoRect.width;
+    var scaleY = vh / videoRect.height;
+
+    var sx = (boxRect.left - videoRect.left) * scaleX;
+    var sy = (boxRect.top - videoRect.top) * scaleY;
+    var sw = boxRect.width * scaleX;
+    var sh = boxRect.height * scaleY;
+
+    var scaleUp = 2;
+    canvas.width = sw * scaleUp;
+    canvas.height = sh * scaleUp;
+    var ctx = canvas.getContext('2d');
+    ctx.drawImage(video, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
+    praprosesGambar(ctx, canvas.width, canvas.height);
+
+    document.getElementById('btnCapture').disabled = true;
+    statusEl.textContent = '⏳ Membaca angka...';
+    statusEl.className = '';
+
+    try {
+      var result = await ocrWorker.recognize(canvas);
+      var rawText = result.data.text || '';
+      var matches = rawText.match(/\d{3,}/g);
+      if (!matches || matches.length === 0) {
+        statusEl.textContent = 'Angka tidak terbaca jelas, coba foto ulang';
+        statusEl.className = 'error';
+        document.getElementById('btnCapture').disabled = false;
+        return;
+      }
+      var terpanjang = matches.reduce(function(a,b){ return b.length > a.length ? b : a; });
+      var kode5 = terpanjang.slice(-5);
+
+      kodeTerakhir = kode5;
+      document.getElementById('resultText').textContent = kode5;
+      document.getElementById('resultPreview').style.display = 'block';
+      statusEl.textContent = '';
+      document.getElementById('btnCapture').disabled = false;
+    } catch (e) {
+      statusEl.textContent = 'Gagal membaca, coba lagi';
+      statusEl.className = 'error';
+      document.getElementById('btnCapture').disabled = false;
+    }
+  }
+
+  function pakaiHasil() {
+    if (sudahKirim || !kodeTerakhir) return;
+    sudahKirim = true;
+    if (window.opener) {
+      window.opener.postMessage({ type: 'ASSET_QR_SCANNED', code: kodeTerakhir }, '*');
+    }
+    statusEl.textContent = '✔ Terkirim';
+    statusEl.className = 'success';
+    setTimeout(function(){ window.close(); }, 400);
+  }
+
+  function ulangiFoto() {
+    document.getElementById('resultPreview').style.display = 'none';
+    kodeTerakhir = "";
+    statusEl.textContent = 'Geser HP: sejajarkan UJUNG KANAN deretan angka ke kotak hijau';
+    statusEl.className = '';
+  }
+
+  function toggleManual() {
+    var box = document.getElementById('manualBox');
+    box.style.display = box.style.display === 'flex' ? 'none' : 'flex';
+  }
+
+  function kirimManual() {
+    var val = document.getElementById('manualInput').value.trim();
+    if (val.length !== 5) { alert('Masukkan tepat 5 digit nomor aset'); return; }
+    kodeTerakhir = val;
+    pakaiHasil();
+  }
+
+  window.addEventListener('load', function(){
+    siapkanOCR();
+    mulaiKamera();
+  });
+  window.addEventListener('beforeunload', function(){
+    if (ocrWorker) ocrWorker.terminate();
+  });
+</script>
+
+</body>
+</html>
